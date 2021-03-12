@@ -1,0 +1,7 @@
+*.mp4
+*.yuv
+*.rgb
+*
+!*.cc
+!*.c
+!.gitignore

@@ -38,6 +38,10 @@ int main(int argc, char* argv[])
 		printf("Couldn't open input stream.\n");
 		return -1;
 	}
+
+	double totalsec = pFormatCtx->duration * av_q2d(AV_TIME_BASE_Q);
+	printf("video duration: %lf\n", totalsec);
+
 	if(avformat_find_stream_info(pFormatCtx,NULL)<0){
 		printf("Couldn't find stream information.\n");
 		return -1;
@@ -70,10 +74,7 @@ int main(int argc, char* argv[])
 		printf("Could not open codec.\n");
 		return -1;
 	}
-	/*
-	 * 在此处添加输出视频信息的代码
-	 * 取自于pFormatCtx，使用fprintf()
-	 */
+
 	pFrame=av_frame_alloc();
 	pFrameYUV=av_frame_alloc();
 	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(AV_PIX_FMT_YUV444P, pCodecCtx->width, pCodecCtx->height));
@@ -84,7 +85,7 @@ int main(int argc, char* argv[])
 	printf("--------------- File Information ----------------\n");
 	av_dump_format(pFormatCtx,0,filepath,0);
 	printf("-------------------------------------------------\n");
-	printf("pCodexCtx->pix_fmt: %d\n", pCodecCtx->pix_fmt);
+	//printf("pCodexCtx->pix_fmt: %d\n", pCodecCtx->pix_fmt);
 	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
 		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV444P, SWS_BICUBIC, NULL, NULL, NULL); 
 
@@ -96,37 +97,49 @@ int main(int argc, char* argv[])
 	avcodec_parameters_copy(h264bsfc->par_in, pFormatCtx->streams[videoindex]->codecpar);
 	av_bsf_init(h264bsfc);
 
-	for (int i = 0; i < pCodecCtx->extradata_size; i++){
-		printf("%0x ", pCodecCtx->extradata[i]);
-	}
-	printf("sps pps end\n");
+	/*
+		for (int i = 0; i < pCodecCtx->extradata_size; i++){
+			printf("%0x ", pCodecCtx->extradata[i]);
+		}
+		printf("sps pps end\n");
+	*/
+	//int64_t timestamp = 1 * AV_TIME_BASE;
+	
+	
+		//*注意timebase不同阶段使用不同的timebase????//FIXME
+	int64_t timestamp = 2 * pFormatCtx->streams[videoindex]->time_base.den;
+	av_seek_frame(pFormatCtx, videoindex, timestamp, AVSEEK_FLAG_BACKWARD);
+	
 	while(av_read_frame(pFormatCtx, packet)>=0){
 		//AVPacket packet_copy;
 		//av_copy_packet(&packet_copy, packet);
 		if(packet->stream_index==videoindex){
-				/*
-				 * 在此处添加输出H264码流的代码
-				 * 取自于packet，使用fwrite()
-				 */
 			//AVPacket pack = *packet;
+			/*
 			for (int i = 0; i < 100; i++){
 				printf("%0x ", packet->data[i]);
 			}
+			
 			printf("raw packet->size: %d\n", packet->size);
-			//printf("raw code\n");
+			printf("raw code\n");
+			*/
+			/*
+			测试ACPacket->data的前四个字节
 			int32_t numsize = 0;
 			memcpy(&numsize, packet->data, 4);
 			printf("test top 4 bytes %d\n", ntohl(numsize));
+			*/
 			ret = av_bsf_send_packet(h264bsfc, packet);
         	if(ret < 0) {
 				printf("av_bsf_send_packet failed\n");
 			}
 			while ((ret = av_bsf_receive_packet(h264bsfc, packet)) == 0) {
+				/*
 				for (int i = 0; i < 100; i++){
 					printf("%0x ", packet->data[i]);
 				}
 				printf("after bsf packet->size: %d\n", packet->size);
-				printf("\n");
+				*/
 				fwrite(packet->data, packet->size, 1, fd);
 			}
 			//av_packet_unref(&pack);
@@ -162,6 +175,8 @@ int main(int argc, char* argv[])
 			/*
 				H264裸流可以直接放入解码器解码
 			*/
+			double packet_sec = packet->pts * av_q2d(pFormatCtx->streams[videoindex]->time_base);
+			printf("packet sec: %lf\n", packet_sec);
 			ret = avcodec_send_packet(pCodecCtx, packet);
 			//if ( ret == AVERROR(EAGAIN) || ret == AVERROR_EOF ) break;
         	if(ret < 0){
@@ -169,6 +184,7 @@ int main(int argc, char* argv[])
 				return -1;
 			}
             //printf("avcodec_send_packet\n");
+			
 			while (avcodec_receive_frame(pCodecCtx, pFrame) == 0){
 				//printf("pixel_format: %d\n", pFrame->format);
 				sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
