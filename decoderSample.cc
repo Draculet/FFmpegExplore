@@ -6,7 +6,8 @@ extern "C"
 #include "libswscale/swscale.h"
 #include <libavutil/imgutils.h>
 };
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
+#include <string>
 
 
 int main(int argc, char* argv[])
@@ -22,18 +23,14 @@ int main(int argc, char* argv[])
 	int ret, got_picture;
 	struct SwsContext *img_convert_ctx;
 	//输入文件路径
-	char filepath[]="output2.mp4";
-	FILE *fd = fopen("output.h264", "wb");
-	FILE *fdx = fopen("outputx.yuv", "wb");
-	FILE *fdy = fopen("outputy.yuv", "wb");
-
+	//char filepath[]="/home/ubuntu/video_example/";
+	std::string filepath = "/home/ubuntu/video_example/" + std::string(argv[1]);
 	int frame_cnt;
-
 	av_register_all();
 	avformat_network_init();
 	pFormatCtx = avformat_alloc_context();
 
-	if(avformat_open_input(&pFormatCtx,filepath,NULL,NULL)!=0){
+	if (avformat_open_input(&pFormatCtx, filepath.c_str(), NULL, NULL) != 0){
 		printf("Couldn't open input stream.\n");
 		return -1;
 	}
@@ -81,117 +78,77 @@ int main(int argc, char* argv[])
 	packet=(AVPacket *)av_malloc(sizeof(AVPacket));
 	//Output Info-----------------------------
 	printf("--------------- File Information ----------------\n");
-	av_dump_format(pFormatCtx,0,filepath,0);
+	av_dump_format(pFormatCtx,0,filepath.c_str(),0);
 	printf("-------------------------------------------------\n");
 	printf("pCodexCtx->pix_fmt: %d\n", pCodecCtx->pix_fmt);
 	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
 		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV411P, SWS_BICUBIC, NULL, NULL, NULL); 
 
 	frame_cnt=0;
-
-/*	AVBSFContext * h264bsfc;
-	const AVBitStreamFilter * filter = av_bsf_get_by_name("h264_mp4toannexb");
-	av_bsf_alloc(filter, &h264bsfc);
-	avcodec_parameters_copy(h264bsfc->par_in, pFormatCtx->streams[videoindex]->codecpar);
-	av_bsf_init(h264bsfc);
-	for (int i = 0; i < pCodecCtx->extradata_size; i++){
-		printf("%0x ", pCodecCtx->extradata[i]);
-	}
-	printf("sps pps end\n");
-*/
+	printf("total time: %lf\n", pFormatCtx->duration * av_q2d(AV_TIME_BASE_Q));
+	
 	while(av_read_frame(pFormatCtx, packet)>=0){
-		//AVPacket packet_copy;
-		//av_copy_packet(&packet_copy, packet);
 		if(packet->stream_index==videoindex){
-				/*
-				 * 在此处添加输出H264码流的代码
-				 * 取自于packet，使用fwrite()
-				 */
-			//AVPacket pack = *packet;
-			/*for (int i = 0; i < 100; i++){
-				printf("%0x ", packet->data[i]);
+			printf("packet PTS:%ld DTS:%ld\n", packet->pts, packet->dts);
+			if (packet->flags & AV_PKT_FLAG_KEY){
+				//printf("packet is key frame\n");
 			}
-			printf("raw packet->size: %d\n", packet->size);
-			//printf("raw code\n");
-			int32_t numsize = 0;
-			memcpy(&numsize, packet->data, 4);
-			printf("test top 4 bytes %d\n", ntohl(numsize));
-			ret = av_bsf_send_packet(h264bsfc, packet);
-        	if(ret < 0) {
-				printf("av_bsf_send_packet failed\n");
-			}
-			while ((ret = av_bsf_receive_packet(h264bsfc, packet)) == 0) {
-				for (int i = 0; i < 100; i++){
-					printf("%0x ", packet->data[i]);
-				}
-				printf("after bsf packet->size: %d\n", packet->size);
-				printf("\n");
-				fwrite(packet->data, packet->size, 1, fd);
-			}
-			//av_packet_unref(&pack);
-
-			//fwrite(packet->data, 1, packet->size, fd);
-			
-			//ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_picture, packet);
-            //new API 解决缓存帧问题
-            */
-            
-/*			
-			ret = avcodec_send_packet(pCodecCtx, packet);
-			if ( ret == AVERROR(EAGAIN) || ret == AVERROR_EOF ) break;
-        	else if(ret < 0){
+			/*
+			printf("packet dts:%ld pts:%ld\n", packet->dts, packet->pts);
+			ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_picture, packet);
+			if(ret < 0){
 				printf("Decode Error.\n");
 				return -1;
 			}
-            //printf("avcodec_send_packet\n");
-			while (avcodec_receive_frame(pCodecCtx, pFrame) == 0){
-				//printf("pixel_format: %d\n", pFrame->format);
-				sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
-					pFrameYUV->data, pFrameYUV->linesize);
-				//printf("pixel_format: %d\n", pFrameYUV->format);
-				printf("Decoded frame index: %d\n",frame_cnt);
-				fwrite(pFrameYUV->data[0], 1, pCodecCtx->height * pCodecCtx->width, fdx);
-				fwrite(pFrameYUV->data[1], 1, pCodecCtx->height * pCodecCtx->width, fdx);
-				fwrite(pFrameYUV->data[2], 1, pCodecCtx->height * pCodecCtx->width, fdx);
-				/*
-				 * 在此处添加输出YUV的代码
-				 * 取自于pFrameYUV，使用fwrite()
-				 */
-//				frame_cnt++;
-//			}
-			/*
-				packet_copy,注意如果带缓存则大概率出错
+			if(got_picture){
+				printf("got pic\n");
 			*/
+			//printf("packet is ", packet-> )
 			ret = avcodec_send_packet(pCodecCtx, packet);
         	if(ret < 0){
 				printf("Decode Error.\n");
 				return -1;
 			}
-            //printf("avcodec_send_packet\n");
-			while (ret = avcodec_receive_frame(pCodecCtx, pFrame) >= 0){
-                if ( ret == AVERROR(EAGAIN) || ret == AVERROR_EOF ) break;
+            printf("avcodec_send_packet\n");
+			
+			/*
+			printf("AVStream timebase: %d/%d AVCodec timebase: %d/%d, ticks: %d, fps: %lf\n",
+				pFormatCtx->streams[videoindex]->time_base.den,
+					pFormatCtx->streams[videoindex]->time_base.num,
+						pCodecCtx->time_base.den,
+							pCodecCtx->time_base.num,
+								pCodecCtx->ticks_per_frame,
+									(double)pCodecCtx->time_base.den / pCodecCtx->time_base.num / pCodecCtx->ticks_per_frame);
+			exit(0);
+			*/
+			while (ret >= 0) {
+				ret = avcodec_receive_frame(pCodecCtx, pFrame);
+				//printf("recv ret %d\n", ret);
+                if ( ret == AVERROR(EAGAIN) || ret == AVERROR_EOF ) {
+					//printf("Eagain or eof\n");
+					if (ret == AVERROR(EAGAIN)) printf("EAGAIN\n");
+					else if (ret == AVERROR_EOF) printf("EOF\n");
+					break;
+				}
                 else if(ret < 0){
                     printf("Decode Error.\n");
                     return -1;
                 }
+				printf("frame type: %d\n", pFrame->pict_type);
+				printf("frame PTS:%ld DTS:%ld\n", pFrame->pkt_pts, pFrame->pkt_dts);
+				printf("timestamp: %lf\n", pFrame->pkt_pts * av_q2d(pFormatCtx->streams[videoindex]->time_base));
 				//printf("pixel_format: %d\n", pFrame->format);
 				sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
 					pFrameYUV->data, pFrameYUV->linesize);
 				//printf("pixel_format: %d\n", pFrameYUV->format);
 				printf("Decoded frame index: %d\n",frame_cnt);
-				fwrite(pFrameYUV->data[0], 1, pCodecCtx->height * pCodecCtx->width, fdy);
-				fwrite(pFrameYUV->data[1], 1, pCodecCtx->height * pCodecCtx->width/4, fdy);
-				fwrite(pFrameYUV->data[2], 1, pCodecCtx->height * pCodecCtx->width/4, fdy);
-				/*
-				 * 在此处添加输出YUV的代码
-				 * 取自于pFrameYUV，使用fwrite()
-				 */
+				//fwrite(pFrameYUV->data[0], 1, pCodecCtx->height * pCodecCtx->width, fdy);
+				//fwrite(pFrameYUV->data[1], 1, pCodecCtx->height * pCodecCtx->width/4, fdy);
+				//fwrite(pFrameYUV->data[2], 1, pCodecCtx->height * pCodecCtx->width/4, fdy);
 				frame_cnt++;
 			}
 		}
-		//av_packet_unref(packet);
 		av_free_packet(packet);
-		//av_free_packet(&packet_copy);
 	}
 
 	sws_freeContext(img_convert_ctx);
@@ -200,7 +157,6 @@ int main(int argc, char* argv[])
 	av_frame_free(&pFrame);
 	avcodec_close(pCodecCtx);
 	avformat_close_input(&pFormatCtx);
-	fclose(fd);
 
 	return 0;
 }

@@ -3,98 +3,171 @@
 extern "C"
 {
 #include "libavcodec/avcodec.h"
-#include "libavformat/avformat.h"
-#include "libswscale/swscale.h"
-#include <libavutil/imgutils.h>
 #include <SDL2/SDL.h>
 };
 #include <arpa/inet.h> 
+#include <string>
+#include <fcntl.h>
+#include <vector>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <event2/buffer.h>
+#include <assert.h>
+#include <atomic>
+#include "CircleQueue.h"
+#include "PlayerFlvParser.h"
 
 
-int screen_w = 800,screen_h = 600;
 #define LOADPIC_EVENT  (SDL_USEREVENT + 1)
 #define BREAK_EVENT  (SDL_USEREVENT + 2)
 
-bool quit = false;
-int threadfunc(void *opaque){
-	while (!quit) {
-		SDL_Event event;
-		event.type = LOADPIC_EVENT;
-		SDL_PushEvent(&event);
-        SDL_Delay(40);
+//可用于播放flv文件
+
+std::atomic<bool> quit(false);
+
+void Decode(int &width, int &height, AVCodecContext *ctx, AVPacket *pkt,
+        std::mutex &m, std::condition_variable &cv, std::vector<AVFrame *> &frames){
+    if ((width == 0 || height == 0) && ctx->width > 0 && ctx->height > 0){
+        std::unique_lock<std::mutex> lk(m);
+        width = ctx->width;
+        height = ctx->height;
+        cv.notify_one();
     }
-	return 0;
+    int ret = avcodec_send_packet(ctx, pkt);
+    if (ret < 0) {
+        fprintf(stderr, "Error sending a packet for decoding\n");
+        //exit(1);
+    }
+    while (ret >= 0) {
+        AVFrame *frame = av_frame_alloc();
+        ret = avcodec_receive_frame(ctx, frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF){
+            av_frame_free(&frame);
+            assert(frame == nullptr);
+            return;
+        }
+        else if (ret < 0) {
+            fprintf(stderr, "Error during decoding\n");
+            exit(1);
+        }
+        std::unique_lock<std::mutex> lock(m);
+        printf("thread push index %ld\n", frames.size());
+        frames.push_back(frame);
+    }
+}
+
+void DecodeThreadFunc(int &width, int &height, std::vector<AVFrame *> &frames, 
+            std::mutex &m, std::condition_variable &cv, std::string filepath){
+    AVCodecContext *ctx = nullptr;
+    const AVCodec *codec;
+    int fd;
+    avcodec_register_all();
+    codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) {
+        fprintf(stderr, "Codec not found\n");
+        exit(1);
+    }
+    ctx = avcodec_alloc_context3(codec);
+    if (ctx == nullptr) {
+        fprintf(stderr, "Could not allocate video codec context\n");
+        exit(1);
+    }
+    if (avcodec_open2(ctx, codec, nullptr) < 0) {
+        printf("avodec_error\n");                           
+        exit(1);
+    }
+	//c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    fd = open(filepath.c_str(), O_RDONLY);
+    if (!fd) {
+        fprintf(stderr, "Could not open %s\n", filepath.c_str());
+        exit(1);
+    }
+    size_t inputsize;
+    uint8_t *sps;
+    int spssize = 0;
+	int ret = 1;
+    AVPacket *pkt = nullptr;
+    evbuffer *evbuf = evbuffer_new();
+    Parser parser;
+    Tag *tag = nullptr;
+    VideoTag *curTag = nullptr;
+    uint8_t *data = nullptr;
+    int pktsize = 0;
+    int index = 0;
+    while (ret) {
+        ret = evbuffer_read(evbuf, fd, 1024 * 1024);
+        if (ret <= 0) break;
+        parser.ParseFlv(evbuf);
+        while (parser.flvtags.size() > index){
+            tag = parser.flvtags[index];
+            if (tag->header->type == 0x09){
+                curTag = (VideoTag *)tag;
+                if (curTag->getH264Stream() != nullptr){
+                    evbuffer *videoStream = curTag->getH264Stream();
+                    data = new uint8_t[evbuffer_get_length(videoStream)];
+                    pktsize = evbuffer_get_length(videoStream);
+                    evbuffer_remove(videoStream, data, evbuffer_get_length(videoStream));
+                    pkt = av_packet_alloc();
+                    pkt->data = data;
+                    pkt->size = pktsize;
+                    printf("packet start: size: %d\n", pkt->size);
+                    Decode(width, height, ctx, pkt, m, cv, frames);
+                    delete []data; //FIXME av_packet_free没有释放pkt内存,手动释放
+                    av_packet_free(&pkt);
+                    assert(pkt == nullptr);
+                }
+                delete curTag;//边解析边释放已经传入解码器的flvtag,但是不清flvtags vector,目的是防止解码过程使用过多内存
+                parser.flvtags[index] = nullptr;
+                index++;
+            } else {
+                delete tag;//边解析边释放非视频flvtag
+                parser.flvtags[index] = nullptr;
+                index++;
+            }
+        }
+    }
+    //FIXME 该步用于刷新解码器,是否需要刷新解码器
+    Decode(width, height, ctx, nullptr, m, cv, frames);
+    {
+        std::unique_lock<std::mutex> lock(m);
+        //标志播放结束
+        frames.push_back(nullptr);
+    }
+    avcodec_close(ctx);
+    avcodec_free_context(&ctx);
+    evbuffer_free(evbuf);
+    assert(parser.flvtags.size() > 0);
+    printf("final: parser flvtags size: %ld\n", parser.flvtags.size());
+    for (int i = 0; i < parser.flvtags.size(); i++){
+        assert(parser.flvtags[i] == nullptr);
+    }
 }
 
 int main(int argc, char* argv[])
 {
-	AVFormatContext	*pFormatCtx;
-	int				i, videoindex;
-	AVCodecContext	*pCodecCtx;
-	AVCodec			*pCodec;
-	AVFrame	*pFrame,*pFrameYUV;
-	uint8_t *out_buffer;
-	AVPacket *packet;
-	int y_size;
-	int ret, got_picture;
-	struct SwsContext *img_convert_ctx;
-	//输入文件路径
-	char filepath[]="output2tmp.mp4";
-	//FILE *fd = fopen(filepath, "wb");
-    int frame_cnt;
-
-	av_register_all();
-	avformat_network_init();
-	pFormatCtx = avformat_alloc_context();
-
-	if(avformat_open_input(&pFormatCtx,filepath,NULL,NULL)!=0){
-		printf("Couldn't open input stream.\n");
-		return -1;
-	}
-
-	double totalsec = pFormatCtx->duration * av_q2d(AV_TIME_BASE_Q);
-	printf("video duration: %lf\n", totalsec);
-
-	if(avformat_find_stream_info(pFormatCtx,NULL)<0){
-		printf("Couldn't find stream information.\n");
-		return -1;
-	}
-	videoindex=-1;
-	//AVStream
-	printf("test nb_streams: %d\n", pFormatCtx->nb_streams);
-
-	for (i=0; i < pFormatCtx->nb_streams; i++){
-		if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO){
-			videoindex=i;
-			break;
-		}
-    }
-	if(videoindex==-1){
-		printf("Didn't find a video stream.\n");
-		return -1;
-	}
-    pCodecCtx = avcodec_alloc_context3(NULL);
-    avcodec_parameters_to_context(pCodecCtx, pFormatCtx->streams[videoindex]->codecpar);
-    pCodec = avcodec_find_decoder(pCodecCtx->codec_id);
-	if( pCodec == NULL){
-		printf("Codec not found.\n");
-		return -1;
-	}
-	if(avcodec_open2(pCodecCtx, pCodec,NULL)<0){
-		printf("Could not open codec.\n");
-		return -1;
-	}
-
-
-    //SDL Init
+	std::string filepath = std::string(argv[1]);
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<AVFrame *> frames;
+    //std::atomic<AVCodecContext *> ctx;
+    int width = 0, height = 0;
+    std::thread t([&width, &height, &m, &frames, &cv, filepath]{
+        DecodeThreadFunc(width, height, frames, m, cv, filepath);
+    });
     if(SDL_Init(SDL_INIT_VIDEO)) {  
 		printf( "Could not initialize SDL - %s\n", SDL_GetError()); 
 		return -1;
 	}
-	SDL_Window *screen; 
-	//SDL 2.0 Support for multiple windows
+    {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&width, &height]{return width > 0 && height > 0;});
+    }
+    printf("SDL get width: %d, height: %d\n", width, height);
+    assert(width > 0 && height > 0);
+    SDL_Window *screen; 
 	screen = SDL_CreateWindow("SDL2 player", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-		screen_w, screen_h,SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
+		width, height, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
 	if(!screen) {
 		printf("SDL: could not create window - exiting:%s\n",SDL_GetError());  
 		return -1;
@@ -102,75 +175,87 @@ int main(int argc, char* argv[])
 	SDL_Renderer* sdlRenderer = SDL_CreateRenderer(screen, -1, 0);  
 	//IYUV: Y + U + V  (3 planes)
 	//YV12: Y + V + U  (3 planes)
-	SDL_Texture* sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, pCodecCtx->width, pCodecCtx->height);
+	SDL_Texture* sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_IYUV,
+         SDL_TEXTUREACCESS_STREAMING, width, height);
     SDL_Rect sdlRect;
 	SDL_Event event;
-    pFrame=av_frame_alloc();
-	pFrameYUV=av_frame_alloc();
-    out_buffer=(uint8_t *)av_malloc(avpicture_get_size(AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height));
-	av_image_fill_arrays(pFrameYUV->data, pFrameYUV->linesize, out_buffer, AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height, 1);
-	packet=(AVPacket *)av_malloc(sizeof(AVPacket));
-	printf("--------------- File Information ----------------\n");
-	av_dump_format(pFormatCtx,0,filepath,0);
-	printf("-------------------------------------------------\n");
-	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt,
-		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
-	frame_cnt=0;
-    uint8_t buf[pCodecCtx->height * pCodecCtx->width * 3 / 2] = {0};
-    SDL_Thread *refresh_thread = SDL_CreateThread(threadfunc,NULL,NULL);
-    while (true) {
+    uint8_t buf[width * height * 3 / 2] = {0};
+
+    //SDL_Thread *refresh_thread = SDL_CreateThread(threadfunc, nullptr, nullptr);
+	std::thread t2([]{
+        while (!quit) {
+            SDL_Event event;
+            event.type = LOADPIC_EVENT;
+            SDL_PushEvent(&event);
+            SDL_Delay(40);
+        }
+    });
+    int index = 0;
+    AVFrame *preFrame = nullptr;
+    AVFrame *freeFrame = nullptr;
+    AVFrame *pFrame = nullptr;
+    int windowWidth = width;
+    int windowHeight = height;
+    std::vector<AVFrame *> decodeFrames;
+	while (true) {
+        if (freeFrame != nullptr){
+            av_frame_free(&freeFrame);
+            assert(freeFrame == nullptr);
+        }
+
+        if (decodeFrames.size() == index){
+            decodeFrames.clear();
+            std::unique_lock<std::mutex> lock(m);
+            if (!frames.empty()){
+                decodeFrames.swap(frames);
+                index = 0;
+            }
+        }
 		SDL_WaitEvent(&event);
 		if(event.type == LOADPIC_EVENT){
-			while (av_read_frame(pFormatCtx, packet) >= 0){
-                if(packet->stream_index==videoindex){
-                    ret = avcodec_send_packet(pCodecCtx, packet);
-                    if(ret < 0){
-                        printf("Decode Error.\n");
-                        return -1;
-                    }
-                    while (avcodec_receive_frame(pCodecCtx, pFrame) == 0){
-                        sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
-                            pFrameYUV->data, pFrameYUV->linesize);
-                        printf("Decoded frame index: %d\n",frame_cnt);
-                        int h = pCodecCtx->height, w = pCodecCtx->width;
-                        memcpy(buf, pFrame->data[0], h * w);
-                        memcpy(buf + w * h, pFrame->data[1], h * w / 4);
-                        memcpy(buf + w * h * 5 / 4, pFrame->data[2], h * w / 4);
-                        frame_cnt++;
-                        printf("present %dx%d test%d\n", h ,w, pFrame->linesize[0]);
-                        SDL_UpdateTexture( sdlTexture, NULL, buf, w);
-                        //FIX: If window is resize
-                        sdlRect.x = screen_w/4;  
-                        sdlRect.y = screen_h/4;
-                        sdlRect.w = screen_w/2;
-                        sdlRect.h = screen_h/2;
-                        SDL_RenderClear( sdlRenderer );   
-                        SDL_RenderCopy( sdlRenderer, sdlTexture, NULL, &sdlRect);  
-                        SDL_RenderPresent( sdlRenderer ); 
-                    }
-                    av_free_packet(packet);
-                    break;
-                }
-                av_free_packet(packet);
+            if (decodeFrames.size() >= index + 1){
+                pFrame = decodeFrames[index];
+                index++;
+            } else {
+                if (preFrame)
+                    pFrame = preFrame; //播放上一帧
+                else continue;
             }
+            if (pFrame == nullptr){
+                //播放完成
+                break;
+            }
+            int h = height, w = width;
+            memcpy(buf, pFrame->data[0], h * w);
+            memcpy(buf + w * h, pFrame->data[1], h * w / 4);
+            memcpy(buf + w * h * 5 / 4, pFrame->data[2], h * w / 4);
+
+            SDL_UpdateTexture(sdlTexture, nullptr, buf, pFrame->linesize[0]);
+            sdlRect.x = 0;  
+            sdlRect.y = 0;
+            sdlRect.w = windowWidth;
+            sdlRect.h = windowHeight;
+            SDL_RenderClear(sdlRenderer);
+            SDL_RenderCopy(sdlRenderer, sdlTexture, nullptr, &sdlRect); 
+            SDL_RenderPresent(sdlRenderer);
+            freeFrame = preFrame;
+            preFrame = pFrame;
 		} else if(event.type == SDL_WINDOWEVENT){
-			SDL_GetWindowSize(screen, &screen_w, &screen_h);
+			SDL_GetWindowSize(screen, &windowWidth, &windowHeight);
 		} else if(event.type == SDL_QUIT){
 			quit = true;
-            printf("SDL_QUIT EVENT\n");
             break;
 		}
 	}
-	SDL_Quit();
-
-
-	sws_freeContext(img_convert_ctx);
-
-	av_frame_free(&pFrameYUV);
-	av_frame_free(&pFrame);
-	avcodec_close(pCodecCtx);
-	avformat_close_input(&pFormatCtx);
-
+    quit = true;
+    if (preFrame) av_frame_free(&preFrame);
+    if (freeFrame) av_frame_free(&freeFrame);
+    //sleep(10);
+    t.join();
+    t2.join();
+    SDL_DestroyWindow(screen);
+    SDL_DestroyTexture(sdlTexture);
+    SDL_DestroyRenderer(sdlRenderer);
 	return 0;
+    //SUMMARY: AddressSanitizer: 4799 byte(s) leaked in 43 allocation(s).
 }
-

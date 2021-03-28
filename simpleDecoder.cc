@@ -16,16 +16,16 @@ int main(int argc, char* argv[])
 	int				i, videoindex;
 	AVCodecContext	*pCodecCtx;
 	AVCodec			*pCodec;
-	AVFrame	*pFrame,*pFrameYUV;
+	AVFrame	*pFrame;
 	uint8_t *out_buffer;
 	AVPacket *packet;
 	int y_size;
 	int ret, got_picture;
-	struct SwsContext *img_convert_ctx;
+	//struct SwsContext *img_convert_ctx;
 	//输入文件路径
-	char filepath[]="output2.mp4";
+	char filepath[]="example.flv";
 	FILE *fd = fopen("output.h264", "wb");
-	FILE *fdx = fopen("outputx.yuv", "wb");
+	//FILE *fdx = fopen("outputx.yuv", "wb");
 	FILE *fdy = fopen("outputyy.yuv", "wb");
 
 	int frame_cnt;
@@ -76,18 +76,18 @@ int main(int argc, char* argv[])
 	}
 
 	pFrame=av_frame_alloc();
-	pFrameYUV=av_frame_alloc();
-	out_buffer=(uint8_t *)av_malloc(avpicture_get_size(AV_PIX_FMT_YUV444P, pCodecCtx->width, pCodecCtx->height));
+	//pFrameYUV=av_frame_alloc();
+	//out_buffer=(uint8_t *)av_malloc(avpicture_get_size(AV_PIX_FMT_YUV444P, pCodecCtx->width, pCodecCtx->height));
 	//avpicture_fill((AVPicture *)pFrameYUV, out_buffer, AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height);
-	av_image_fill_arrays(pFrameYUV->data, pFrameYUV->linesize, out_buffer, AV_PIX_FMT_YUV444P, pCodecCtx->width, pCodecCtx->height, 1);
+	//av_image_fill_arrays(pFrameYUV->data, pFrameYUV->linesize, out_buffer, AV_PIX_FMT_YUV444P, pCodecCtx->width, pCodecCtx->height, 1);
 	packet=(AVPacket *)av_malloc(sizeof(AVPacket));
 	//Output Info-----------------------------
-	printf("--------------- File Information ----------------\n");
-	av_dump_format(pFormatCtx,0,filepath,0);
-	printf("-------------------------------------------------\n");
+	//printf("--------------- File Information ----------------\n");
+	//av_dump_format(pFormatCtx,0,filepath,0);
+	//printf("-------------------------------------------------\n");
 	//printf("pCodexCtx->pix_fmt: %d\n", pCodecCtx->pix_fmt);
-	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
-		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV444P, SWS_BICUBIC, NULL, NULL, NULL); 
+	//img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
+	//	pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV444P, SWS_BICUBIC, NULL, NULL, NULL); 
 
 	frame_cnt=0;
 
@@ -107,8 +107,8 @@ int main(int argc, char* argv[])
 	
 	
 		//*注意timebase不同阶段使用不同的timebase????//FIXME
-	int64_t timestamp = 2 * pFormatCtx->streams[videoindex]->time_base.den;
-	av_seek_frame(pFormatCtx, videoindex, timestamp, AVSEEK_FLAG_BACKWARD);
+	//int64_t timestamp = 2 * pFormatCtx->streams[videoindex]->time_base.den;
+	//av_seek_frame(pFormatCtx, videoindex, timestamp, AVSEEK_FLAG_BACKWARD);
 	
 	while(av_read_frame(pFormatCtx, packet)>=0){
 		//AVPacket packet_copy;
@@ -134,13 +134,14 @@ int main(int argc, char* argv[])
 				printf("av_bsf_send_packet failed\n");
 			}
 			while ((ret = av_bsf_receive_packet(h264bsfc, packet)) == 0) {
+				printf("recv packet\n");
 				/*
 				for (int i = 0; i < 100; i++){
 					printf("%0x ", packet->data[i]);
 				}
 				printf("after bsf packet->size: %d\n", packet->size);
 				*/
-				fwrite(packet->data, packet->size, 1, fd);
+				//fwrite(packet->data, packet->size, 1, fd);
 			}
 			//av_packet_unref(&pack);
 
@@ -187,13 +188,13 @@ int main(int argc, char* argv[])
 			
 			while (avcodec_receive_frame(pCodecCtx, pFrame) == 0){
 				//printf("pixel_format: %d\n", pFrame->format);
-				sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
-					pFrameYUV->data, pFrameYUV->linesize);
+				//sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
+				//	pFrameYUV->data, pFrameYUV->linesize);
 				//printf("pixel_format: %d\n", pFrameYUV->format);
 				printf("Decoded frame index: %d\n",frame_cnt);
-				fwrite(pFrameYUV->data[0], 1, pCodecCtx->height * pCodecCtx->width, fdy);
-				fwrite(pFrameYUV->data[1], 1, pCodecCtx->height * pCodecCtx->width, fdy);
-				fwrite(pFrameYUV->data[2], 1, pCodecCtx->height * pCodecCtx->width, fdy);
+				fwrite(pFrame->data[0], 1, pCodecCtx->height * pCodecCtx->width, fdy);
+				fwrite(pFrame->data[1], 1, pCodecCtx->height * pCodecCtx->width / 4, fdy);
+				fwrite(pFrame->data[2], 1, pCodecCtx->height * pCodecCtx->width / 4, fdy);
 				/*
 				 * 在此处添加输出YUV的代码
 				 * 取自于pFrameYUV，使用fwrite()
@@ -206,9 +207,9 @@ int main(int argc, char* argv[])
 		//av_free_packet(&packet_copy);
 	}
 
-	sws_freeContext(img_convert_ctx);
+	//sws_freeContext(img_convert_ctx);
 
-	av_frame_free(&pFrameYUV);
+	//av_frame_free(&pFrameYUV);
 	av_frame_free(&pFrame);
 	avcodec_close(pCodecCtx);
 	avformat_close_input(&pFormatCtx);
